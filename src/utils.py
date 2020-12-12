@@ -1,5 +1,10 @@
 # utils.py
 
+from pl_bolts.datamodules.mnist_datamodule import MNISTDataModule
+
+from src.models import CNN, LitModel
+
+
 def sweep_iteration(proj):
     # set up W&B logger
     wandb.init()    # required to have access to `wandb.config`
@@ -25,3 +30,16 @@ def sweep_iteration(proj):
 
     # train
     trainer.fit(model, mnist)
+
+
+def mnist_data():
+    mnist = MNISTDataModule('../data/', batch_size=512)
+    mnist.prepare_data()
+    mnist.setup()
+    return mnist
+
+
+def lit_model():
+    mnist = mnist_data()
+    cnn = CNN(C=mnist.dims[0], num_classes=mnist.num_classes)  # Architecture
+    return LitModel(datamodule=mnist, arch=cnn, lr=1e-3, flood=True)  # Lightning model
