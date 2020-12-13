@@ -1,5 +1,7 @@
 from warnings import warn
 
+import albumentations as A
+
 import torch
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader, random_split
@@ -15,6 +17,15 @@ else:
     _TORCHVISION_AVAILABLE = True
 
 
+def alb_to_torch_aug(aug):
+    '''albumentations.Compose wrapper for PyTorch compatibility.'''
+    if type(aug) == A.Compose:
+        def wrapped_aug(x, *args, **kwargs):
+            return aug(image=A.np.array(x), *args, **kwargs)['image']
+        return wrapped_aug
+    else: return aug
+
+
 class MNISTDataModule(LightningDataModule):
 
     name = "mnist"
@@ -27,6 +38,9 @@ class MNISTDataModule(LightningDataModule):
         normalize: bool = False,
         seed: int = 42,
         batch_size: int = 32,
+        train_transforms = None,
+        val_transforms = None,
+        test_transforms = None,
         *args,
         **kwargs,
     ):
@@ -74,6 +88,9 @@ class MNISTDataModule(LightningDataModule):
         self.normalize = normalize
         self.seed = seed
         self.batch_size = batch_size
+        self.train_transforms = alb_to_torch_aug(train_transforms)
+        self.val_transforms = alb_to_torch_aug(val_transforms)
+        self.test_transforms = alb_to_torch_aug(test_transforms)
 
     @property
     def num_classes(self):
