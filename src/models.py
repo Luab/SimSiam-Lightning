@@ -3,6 +3,10 @@
 # regular
 from collections import OrderedDict
 
+# Albumentations
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
 # PyTorch
 import torch
 from torch import nn
@@ -14,11 +18,37 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import pytorch_lightning as pl
 from pytorch_lightning.core.lightning import LightningModule
 
+# internal
+from src.dataset import alb_to_torch_aug
 
-LOG_KWS = dict(
+
+# const
+LOG_KWARGS = dict(
     #on_step=True, on_epoch=True, prog_bar=True, logger=True
 )
+AUG_KWARGS = dict(
+    border_mode=A.cv2.BORDER_CONSTANT, value=0, interpolation=A.cv2.INTER_LANCZOS4
+)
 
+AUG = alb_to_torch_aug(  # wrapper for pytorch-like behavior
+    A.Compose([
+        #A.RandomCrop(width=24, height=24),
+        #A.GridDistortion(p=0.5, distort_limit=.3, **aug_kwargs),
+        A.ElasticTransform(p=0.5, sigma=1, alpha=3, alpha_affine=0, **aug_kwargs),
+        A.ElasticTransform(p=0.5, sigma=1, alpha=1, alpha_affine=3, **aug_kwargs),
+        A.ShiftScaleRotate(p=1.0, scale_limit=.2, rotate_limit=0, **aug_kwargs),
+        A.ShiftScaleRotate(p=1.0, scale_limit=0, rotate_limit=25, **aug_kwargs),
+        #A.CoarseDropout(p=1.0, max_holes=8, max_height=4, max_width=4,
+        #                min_holes=1, min_height=4, min_width=4),
+        #A.RandomBrightnessContrast(p=0.2),
+        #A.Blur(blur_limit=4),
+        A.Normalize(mean=(0.0,), std=(1,)),#, max_pixel_value=255),
+        ToTensorV2()
+    ])
+)
+
+
+# Module functions
 
 def conv(i : int, o : int, k : int=3,
          batchnorm : bool = True, relu=nn.LeakyReLU, maxpool : bool = True):
@@ -27,14 +57,11 @@ def conv(i : int, o : int, k : int=3,
     '''
     convblock = OrderedDict([
         ('conv2d', nn.Conv2d(in_channels=i, out_channels=o, kernel_size=k, padding=k//2)),
-        #('bn', nn.BatchNorm2d(num_features=o)),
-        #('relu', relu(inplace=True))
     ])
     if batchnorm: convblock['bn'] = nn.BatchNorm2d(num_features=o)
     convblock['relu'] = relu(inplace=True)
     if maxpool: convblock['maxpool'] = nn.MaxPool2d(kernel_size=2, stride=2)
     return nn.Sequential(convblock)
-
 
 def twoconv(i : int, o : int, k : int = 3, batchnorm : bool = True,  relu=nn.LeakyReLU):
     '''Conv (+ BatchNorm) + ReLU + Conv (+ BatchNorm) + ReLU + MaxPool
@@ -44,7 +71,6 @@ def twoconv(i : int, o : int, k : int = 3, batchnorm : bool = True,  relu=nn.Lea
         ('conv1', conv(i, o, k, batchnorm=batchnorm, relu=relu, maxpool=False)),
         ('conv2', conv(o, o, k, batchnorm=batchnorm, relu=relu, maxpool=True)),
     ]))
-
 
 def fc(i : int, o : int, relu=nn.LeakyReLU):
     '''Linear + ReLU + Dropout.
@@ -56,6 +82,8 @@ def fc(i : int, o : int, relu=nn.LeakyReLU):
         ('dropout', nn.Dropout(p=0.5)),
     ]))
 
+
+# Architecture classes
 
 class MLP(torch.nn.Module):
     '''Multilayer perceptron.'''
@@ -79,27 +107,25 @@ class MLP(torch.nn.Module):
         return x
 
 
-# class CNN(LightningModule):
 class CNN(torch.nn.Module):
     '''CNN based on VGG.'''
     def __init__(self, C : int, num_classes : int):
         super().__init__()
-        d = 4  # 16
+        d = 16  # 4
+        wpool = 16  # 8
+        fc_o = 512  # 128
         self.features = nn.Sequential(
             OrderedDict([('conv1', conv(i=C, o=d, k=3)),
                          ('conv2', conv(i=d, o=2*d, k=3)),
                          ('twoconv1', twoconv(2*d, 4*d, k=3)),
-                         ('twoconv2', twoconv(4*d, 8*d, k=3)),])
-        )
-        wpool = 8
-        fc_o = 128
+                         ('twoconv2', twoconv(4*d, 8*d, k=3)),
+                        ]))
         self.avgpool = nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))
-        # two fc layers that output the logits
-        self.classifier = nn.Sequential(
-            OrderedDict([('fc1', fc(i=wpool * wpool * (wpool*d), o=fc_o//2)),
+        self.classifier = nn.Sequential(  # two fc layers that output the logits
+            OrderedDict([('fc1', fc(i=wpool * wpool * (8*d), o=fc_o//2)),
                          ('fc2', fc(i=fc_o//2, o=fc_o)),
-                         ('linear', torch.nn.Linear(fc_o, num_classes)),])
-        )
+                         ('linear', torch.nn.Linear(fc_o, num_classes)),
+                        ]))
 
     def forward(self, x):
         x = self.features(x)
@@ -107,6 +133,41 @@ class CNN(torch.nn.Module):
         x = torch.flatten(x, 1)
         return self.classifier(x)  # logits
 
+
+def SimSiam(torch.nn.Module):
+    '''Simple siamese-net.
+    backbone: torch module with a `features` property.
+    '''
+    def __init__(self, backbone : torch.nn.Module, aug : A=AUG):
+        super().__init__()
+        d = 16  # 4
+        wpool = 16  # 8
+        fc_o = 512  # 128
+        self.aug = aug
+        self.f = nn.Sequential(
+            OrderedDict([('features', backbone.features),
+                         ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
+                         ('flatten', nn.Flatten(start_dim=1)),
+                         ('fc', fc(i=wpool * wpool * (8*d), o=fc_o)),
+                        ]))
+        self.h = nn.Sequential(
+            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),
+                         ('fc2', fc(i=fc_o//2, o=fc_o)),
+                        ]))
+
+    def gradstop(x):
+        return x.detach()
+
+    def dist(x1, x2):
+        F.cosine_similarity(x1, x2, dim=0)
+
+    def forward(self, x):
+        x2 = self.aug(x)
+        z, z2 = self.f(x), self.f(x2)  # encodings
+        d = self.dist(self.h(z), self.gradstop(z2)) + self.dist(self.h(z2), self.gradstop(z))
+        
+
+# Lightning wrapper class
 
 class LitModel(LightningModule):
     '''Module that hosts all the nice PyTorch-Lightning functions.'''
@@ -135,8 +196,8 @@ class LitModel(LightningModule):
         log_y_hat = F.log_softmax(logits, dim=1)  # log probability
         loss = self.loss(log_y_hat, y, flood)  # w flooding
         acc = self.accuracy(log_y_hat, y)
-        self.log(f'{prefix}_loss', loss, **LOG_KWS)  # log metrics
-        self.log(f'{prefix}_acc', acc, **LOG_KWS)
+        self.log(f'{prefix}_loss', loss, **LOG_KWARGS)  # log metrics
+        self.log(f'{prefix}_acc', acc, **LOG_KWARGS)
         return loss, acc
 
     def training_step(self, batch, batch_idx):
