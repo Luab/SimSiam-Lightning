@@ -15,7 +15,6 @@ from torch.optim import Adam, SGD
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # Lightning
-import pytorch_lightning as pl
 from pytorch_lightning.core.lightning import LightningModule
 
 # internal
@@ -33,11 +32,11 @@ AUG_KWARGS = dict(
 AUG = alb_to_torch_aug(  # wrapper for pytorch-like behavior
     A.Compose([
         #A.RandomCrop(width=24, height=24),
-        #A.GridDistortion(p=0.5, distort_limit=.3, **aug_kwargs),
-        A.ElasticTransform(p=0.5, sigma=1, alpha=3, alpha_affine=0, **aug_kwargs),
-        A.ElasticTransform(p=0.5, sigma=1, alpha=1, alpha_affine=3, **aug_kwargs),
-        A.ShiftScaleRotate(p=1.0, scale_limit=.2, rotate_limit=0, **aug_kwargs),
-        A.ShiftScaleRotate(p=1.0, scale_limit=0, rotate_limit=25, **aug_kwargs),
+        #A.GridDistortion(p=0.5, distort_limit=.3, **AUG_KWARGS),
+        A.ElasticTransform(p=0.5, sigma=1, alpha=3, alpha_affine=0, **AUG_KWARGS),
+        A.ElasticTransform(p=0.5, sigma=1, alpha=1, alpha_affine=3, **AUG_KWARGS),
+        A.ShiftScaleRotate(p=0.5, scale_limit=.2, rotate_limit=0, **AUG_KWARGS),
+        A.ShiftScaleRotate(p=0.5, scale_limit=0, rotate_limit=25, **AUG_KWARGS),
         #A.CoarseDropout(p=1.0, max_holes=8, max_height=4, max_width=4,
         #                min_holes=1, min_height=4, min_width=4),
         #A.RandomBrightnessContrast(p=0.2),
@@ -48,6 +47,7 @@ AUG = alb_to_torch_aug(  # wrapper for pytorch-like behavior
 )
 
 
+# TODO: tests
 # Module functions
 
 def conv(i : int, o : int, k : int=3,
@@ -81,6 +81,9 @@ def fc(i : int, o : int, relu=nn.LeakyReLU):
         ('relu', relu(inplace=True)),
         ('dropout', nn.Dropout(p=0.5)),
     ]))
+
+def stopgrad(x):
+    return x.detach()
 
 
 # Architecture classes
@@ -133,84 +136,109 @@ class CNN(torch.nn.Module):
         x = torch.flatten(x, 1)
         return self.classifier(x)  # logits
 
+    def loss(self, x, y):
+        logits = self(x)  # logits
+        log_y_hat = F.log_softmax(logits, dim=1)  # log probability
+        return F.nll_loss(log_y_hat, y)  # log_y_hat is a log prob
 
-def SimSiam(torch.nn.Module):
-    '''Simple siamese-net.
-    backbone: torch module with a `features` property.
-    '''
-    def __init__(self, backbone : torch.nn.Module, aug : A=AUG):
-        super().__init__()
-        d = 16  # 4
-        wpool = 16  # 8
-        fc_o = 512  # 128
-        self.aug = aug
-        self.f = nn.Sequential(
-            OrderedDict([('features', backbone.features),
-                         ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
-                         ('flatten', nn.Flatten(start_dim=1)),
-                         ('fc', fc(i=wpool * wpool * (8*d), o=fc_o)),
-                        ]))
-        self.h = nn.Sequential(
-            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),
-                         ('fc2', fc(i=fc_o//2, o=fc_o)),
-                        ]))
+    def compute_metrics(self, x, y, metrics):
+        '''Converts (x, y) to an input compatible for the given metrics.'''
+        log_y_hat = F.log_softmax(self(x), dim=1)  # log probability
+        return [metric(log_y_hat, y) for metric in metrics]
 
-    def gradstop(x):
-        return x.detach()
 
-    def dist(x1, x2):
-        F.cosine_similarity(x1, x2, dim=0)
+# def SimSiam(torch.nn.Module):
+#     '''Simple siamese-net.
+#     backbone: torch module with a `features` property.
+#     aug: random augmentation function.
+#     '''
+#     def __init__(self, backbone : torch.nn.Module, aug):
+#         super().__init__()
+#         d, wpool, fc_o = 4, 8, 128  # 16, 16, 512
+#         self.aug = aug
+#         self.f = nn.Sequential(
+#             OrderedDict([('features', backbone.features),
+#                          ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
+#                          ('flatten', nn.Flatten(start_dim=1)),
+#                          ('fc', fc(i=wpool * wpool * (8*d), o=fc_o)),]))
+#         self.h = nn.Sequential(
+#             OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),
+#                          ('fc2', fc(i=fc_o//2, o=fc_o)),]))
 
-    def forward(self, x):
-        x2 = self.aug(x)
-        z, z2 = self.f(x), self.f(x2)  # encodings
-        d = self.dist(self.h(z), self.gradstop(z2)) + self.dist(self.h(z2), self.gradstop(z))
-        
+#     def D(self, p, z):
+#         '''Negative cosine similarity.'''
+#         p = F.normalize(p, dim=1)  # l2-normalize
+#         z = F.normalize(z, dim=1)
+#         return -(p*z).sum(dim=1).mean()
+
+#     def loss(self, z1, z2, p1, p2):
+#         return D(p1, stopgrad(z2))/2 + D(p2, stopgrad(z1))/2
+
+#     def forward(self, x):
+#         x1, x2 = self.aug(x), self.aug(x)  # random augmentations
+#         z1, z2 = self.f(x1), self.f(x2)  # projections
+#         p1, p2 = self.h(z1), self.h(z2)  # predictions
+#         return z1, z2, p1, p2
+
 
 # Lightning wrapper class
 
 class LitModel(LightningModule):
     '''Module that hosts all the nice PyTorch-Lightning functions.'''
-    def __init__(self, datamodule, backbone, lr : float = 1e-3, batch_size : int = 32,
-                 flood : bool = False):
+    def __init__(self, datamodule, backbone, metrics : list = None,
+                 lr : float = 1e-3, batch_size : int = 32, flood : bool = False):
         super().__init__()
         self.dm = datamodule
         self.backbone = backbone  # model architecture
+        self.metrics = metrics or []  # performance metrics (e.g. accuracy)
         self.lr = lr  # learning rate
         self.batch_size = batch_size
         self.flood = flood  # use flooding
         self.save_hyperparameters()  # save hyper-parameters to self.hparams, and log them
-        self.accuracy = pl.metrics.Accuracy()  # metrics
+        #self.accuracy = pl.metrics.Accuracy()  # metrics
 
     def forward(self, x):
         return self.backbone(x)
 
-    def loss(self, y_hat, y, flood : float = 0.05):
-        '''Loss flooding (see arXiv).'''
-        loss = F.nll_loss(y_hat, y)  # yhat is a log prob
+    #def loss(self, y_hat, y, flood : float = 0.05):
+    #    '''Loss flooding (see arXiv).'''
+    #    loss = self.backbone.loss(y_hat, y)  # yhat is a log prob
+    #    if self.flood: loss = torch.abs(loss - flood) + flood
+    #    return loss
+    def loss(self, batch, flood : float = 0.05):
+        '''Loss with flooding (see arXiv).'''
+        loss = self.backbone.loss(*batch)  # yhat is a log prob
         if self.flood: loss = torch.abs(loss - flood) + flood
         return loss
 
-    def step(self, x, y, prefix='', flood : float = 0.05):
-        logits = self(x)  # logits
-        log_y_hat = F.log_softmax(logits, dim=1)  # log probability
-        loss = self.loss(log_y_hat, y, flood)  # w flooding
-        acc = self.accuracy(log_y_hat, y)
-        self.log(f'{prefix}_loss', loss, **LOG_KWARGS)  # log metrics
-        self.log(f'{prefix}_acc', acc, **LOG_KWARGS)
-        return loss, acc
+    def step(self, batch, prefix : str = '', flood : float = 0.05):
+    #def step(self, x, y, prefix : str = '', flood : float = 0.05):
+        #logits = self(x)  # logits
+        #log_y_hat = F.log_softmax(logits, dim=1)  # log probability
+        #loss = self.loss(log_y_hat, y, flood)  # w flooding
+        # Log loss
+        loss = self.loss(batch, flood)  # with flooding
+        self.log(f'{prefix}_loss', loss, **LOG_KWARGS)
+
+        # Log metrics
+        metric_names, metric_callables = zip(*self.metrics)
+        metric_results = self.backbone.compute_metrics(*batch, metric_callables)
+        for name, metric in zip(metric_names, metric_callables):
+            self.log(f'{prefix}_{name}', metric, **LOG_KWARGS)
+            #acc = self.accuracy(log_y_hat, y)
+            #self.log(f'{prefix}_acc', acc, **LOG_KWARGS)
+        return loss
 
     def training_step(self, batch, batch_idx):
-        # default flooding: 0.001 * 50 = 0.05
         lr = self.optimizer.param_groups[0]['lr']
-        loss, acc = self.step(*batch, prefix='train', flood=0.03)#, flood=lr * 50)
+        loss = self.step(batch, prefix='train', flood=0.03)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        self.step(*batch, prefix='val', flood=0)
+        self.step(batch, prefix='val', flood=0)
 
     def test_step(self, batch, batch_idx):
-        self.step(*batch, prefix='test', flood=0)
+        self.step(batch, prefix='test', flood=0)
 
     def configure_optimizers(self):
         self.optimizer = Adam(self.parameters(), lr=self.lr)
