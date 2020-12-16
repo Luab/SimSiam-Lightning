@@ -42,4 +42,4 @@ def mnist_data():
 def lit_model():
     mnist = mnist_data()
     cnn = CNN(C=mnist.dims[0], num_classes=mnist.num_classes)  # Architecture
-    return LitModel(datamodule=mnist, arch=cnn, lr=1e-3, flood=True)  # Lightning model
+    return LitModel(datamodule=mnist, backbone=cnn, lr=1e-3, flood=True)  # Lightning model
