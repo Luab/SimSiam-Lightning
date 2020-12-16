@@ -2,4 +2,4 @@ data/
 envs/
 notebooks/*/
 src/__pycache__/
-
+.gitattributes
