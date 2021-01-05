@@ -1,27 +1,28 @@
 # models.py
 
-# regular
+## regular
 from collections import OrderedDict
 
-# Albumentations
+## Albumentations
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-# PyTorch
+## PyTorch
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import Adam, SGD
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-# Lightning
+## Lightning
+import pytorch_lightning as pl
 from pytorch_lightning.core.lightning import LightningModule
 
-# internal
+## internal
 from src.dataset import alb_to_torch_aug
 
 
-# const
+## const
 LOG_KWARGS = dict(
     #on_step=True, on_epoch=True, prog_bar=True, logger=True
 )
@@ -48,7 +49,7 @@ AUG = alb_to_torch_aug(  # wrapper for pytorch-like behavior
 
 
 # TODO: tests
-# Module functions
+## Module functions
 
 def conv(i : int, o : int, k : int=3,
          batchnorm : bool = True, relu=nn.LeakyReLU, maxpool : bool = True):
@@ -63,6 +64,7 @@ def conv(i : int, o : int, k : int=3,
     if maxpool: convblock['maxpool'] = nn.MaxPool2d(kernel_size=2, stride=2)
     return nn.Sequential(convblock)
 
+
 def twoconv(i : int, o : int, k : int = 3, batchnorm : bool = True,  relu=nn.LeakyReLU):
     '''Conv (+ BatchNorm) + ReLU + Conv (+ BatchNorm) + ReLU + MaxPool
     i: input channels, o: output channels, k: kernel size, relu: relu type
@@ -71,6 +73,7 @@ def twoconv(i : int, o : int, k : int = 3, batchnorm : bool = True,  relu=nn.Lea
         ('conv1', conv(i, o, k, batchnorm=batchnorm, relu=relu, maxpool=False)),
         ('conv2', conv(o, o, k, batchnorm=batchnorm, relu=relu, maxpool=True)),
     ]))
+
 
 def fc(i : int, o : int, relu=nn.LeakyReLU):
     '''Linear + ReLU + Dropout.
@@ -82,11 +85,30 @@ def fc(i : int, o : int, relu=nn.LeakyReLU):
         ('dropout', nn.Dropout(p=0.5)),
     ]))
 
+
 def stopgrad(x):
     return x.detach()
 
+def flood(x, flood_height : float = 0.05):
+    '''Flood the loss value (see arXiv paper).'''
+    return torch.abs(x - flood_height) + flood_height
 
-# Architecture classes
+def log_softmax(batch, forward_callable):
+    '''Cross-entropy loss.'''
+    x, y = batch
+    logits = forward_callable(x)
+    log_y_hat = F.log_softmax(logits, dim=1)  # log probability
+    return F.nll_loss(log_y_hat, y)
+
+def accuracy(batch, forward_callable, device):
+    x, y = batch
+    logits = forward_callable(x)
+    log_y_hat = F.log_softmax(logits, dim=1)  # log probability
+    func = pl.metrics.Accuracy().to(device)
+    return func(log_y_hat, y)
+
+
+## Architectures
 
 class MLP(torch.nn.Module):
     '''Multilayer perceptron.'''
@@ -136,15 +158,74 @@ class CNN(torch.nn.Module):
         x = torch.flatten(x, 1)
         return self.classifier(x)  # logits
 
-    def loss(self, x, y):
-        logits = self(x)  # logits
-        log_y_hat = F.log_softmax(logits, dim=1)  # log probability
-        return F.nll_loss(log_y_hat, y)  # log_y_hat is a log prob
 
-    def compute_metrics(self, x, y, metrics):
-        '''Converts (x, y) to an input compatible for the given metrics.'''
-        log_y_hat = F.log_softmax(self(x), dim=1)  # log probability
-        return [metric(log_y_hat, y) for metric in metrics]
+## Lightning modules
+
+class BaseLitModel(LightningModule):
+    '''A module for all those nice PyTorch-Lightning features.'''
+    def __init__(self, datamodule=None, backbone=None, loss_func=None, metrics : tuple = (),
+                 lr : float = 1e-3, batch_size : int = 32, flood_height: float = 0):
+        super().__init__()
+        self.dm = datamodule
+        self.backbone = backbone  # model architecture
+        self.lr = lr  # learning rate
+        self.batch_size = batch_size
+        self.flood_height = flood_height  # 0.03 # flood the loss
+        self.loss_func = loss_func
+        #self.metrics = torch.nn.ModuleDict({'accuracy': Accuracy()})
+        self.metrics = metrics
+        self.metric_names, self.metric_funcs = zip(*metrics) if metrics else ((), ())
+        print(f'Logging metrics: {list(self.metric_names)}')
+        self.save_hyperparameters()  # save hyper-parameters to self.hparams, and log them
+
+    def forward(self, x):
+        return self.backbone(x)
+
+    def loss(self, batch, flood_height : float = 0):
+        loss = self.loss_func(batch, self.forward)
+        # with flooding, if applied
+        return flood(loss, flood_height) if flood_height > 0 else loss
+
+    def step(self, batch, prefix : str = '', flood_height : float = 0):
+        #raise NotImplementedError()
+        # Log loss
+        loss = self.loss(batch, flood_height)
+        self.log(f'{prefix}_loss', loss, **LOG_KWARGS)
+        # Log metrics
+        metric_results = [metric_func(batch, forward_callable=self.forward, device=self.device)
+                          for metric_func in self.metric_funcs]
+        for name, metric in zip(self.metric_names, metric_results):
+            #print(f'Logging {name}:{metric}')
+            self.log(f'{prefix}_{name}', metric, **LOG_KWARGS)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        lr = self.optimizer.param_groups[0]['lr']
+        loss = self.step(batch, prefix='train', flood_height=self.flood_height)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        self.step(batch, prefix='val', flood_height=0)
+
+    def test_step(self, batch, batch_idx):
+        self.step(batch, prefix='test', flood_height=0)
+
+    def configure_optimizers(self):
+        self.optimizer = Adam(self.parameters(), lr=self.lr)
+        #self.optimizer = SGD(self.parameters(), lr=self.lr, nesterov=True, momentum=0.9)
+        self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5,
+                                           patience=10, cooldown=0)
+        return {'optimizer': self.optimizer,
+                'lr_scheduler': self.scheduler,
+                'monitor': 'val_loss',}
+
+
+# class LitModelClassifier(BaseLitModel):
+#     '''Derived Lightning module for classification.'''
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(loss_func=log_softmax,
+#                          metrics=[('acc', accuracy),]  # performance metrics (e.g. accuracy),
+#                          *args, **kwargs)
 
 
 # def SimSiam(torch.nn.Module):
@@ -179,72 +260,3 @@ class CNN(torch.nn.Module):
 #         z1, z2 = self.f(x1), self.f(x2)  # projections
 #         p1, p2 = self.h(z1), self.h(z2)  # predictions
 #         return z1, z2, p1, p2
-
-
-# Lightning wrapper class
-
-class LitModel(LightningModule):
-    '''Module that hosts all the nice PyTorch-Lightning functions.'''
-    def __init__(self, datamodule, backbone, metrics : list = None,
-                 lr : float = 1e-3, batch_size : int = 32, flood : bool = False):
-        super().__init__()
-        self.dm = datamodule
-        self.backbone = backbone  # model architecture
-        self.metrics = metrics or []  # performance metrics (e.g. accuracy)
-        self.lr = lr  # learning rate
-        self.batch_size = batch_size
-        self.flood = flood  # use flooding
-        self.save_hyperparameters()  # save hyper-parameters to self.hparams, and log them
-        #self.accuracy = pl.metrics.Accuracy()  # metrics
-
-    def forward(self, x):
-        return self.backbone(x)
-
-    #def loss(self, y_hat, y, flood : float = 0.05):
-    #    '''Loss flooding (see arXiv).'''
-    #    loss = self.backbone.loss(y_hat, y)  # yhat is a log prob
-    #    if self.flood: loss = torch.abs(loss - flood) + flood
-    #    return loss
-    def loss(self, batch, flood : float = 0.05):
-        '''Loss with flooding (see arXiv).'''
-        loss = self.backbone.loss(*batch)  # yhat is a log prob
-        if self.flood: loss = torch.abs(loss - flood) + flood
-        return loss
-
-    def step(self, batch, prefix : str = '', flood : float = 0.05):
-    #def step(self, x, y, prefix : str = '', flood : float = 0.05):
-        #logits = self(x)  # logits
-        #log_y_hat = F.log_softmax(logits, dim=1)  # log probability
-        #loss = self.loss(log_y_hat, y, flood)  # w flooding
-        # Log loss
-        loss = self.loss(batch, flood)  # with flooding
-        self.log(f'{prefix}_loss', loss, **LOG_KWARGS)
-
-        # Log metrics
-        metric_names, metric_callables = zip(*self.metrics)
-        metric_results = self.backbone.compute_metrics(*batch, metric_callables)
-        for name, metric in zip(metric_names, metric_callables):
-            self.log(f'{prefix}_{name}', metric, **LOG_KWARGS)
-            #acc = self.accuracy(log_y_hat, y)
-            #self.log(f'{prefix}_acc', acc, **LOG_KWARGS)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        lr = self.optimizer.param_groups[0]['lr']
-        loss = self.step(batch, prefix='train', flood=0.03)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        self.step(batch, prefix='val', flood=0)
-
-    def test_step(self, batch, batch_idx):
-        self.step(batch, prefix='test', flood=0)
-
-    def configure_optimizers(self):
-        self.optimizer = Adam(self.parameters(), lr=self.lr)
-        #self.optimizer = SGD(self.parameters(), lr=self.lr, nesterov=True, momentum=0.9)
-        self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5,
-                                           patience=10, cooldown=0)
-        return {'optimizer': self.optimizer,
-                'lr_scheduler': self.scheduler,
-                'monitor': 'val_loss',}
