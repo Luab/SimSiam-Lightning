@@ -86,19 +86,7 @@ def fc(i : int, o : int, relu=nn.LeakyReLU):
     ]))
 
 
-def stopgrad(x):
-    return x.detach()
-
-def flood(x, flood_height : float = 0.05):
-    '''Flood the loss value (see arXiv paper).'''
-    return torch.abs(x - flood_height) + flood_height
-
-def log_softmax(batch, forward_callable):
-    '''Cross-entropy loss.'''
-    x, y = batch
-    logits = forward_callable(x)
-    log_y_hat = F.log_softmax(logits, dim=1)  # log probability
-    return F.nll_loss(log_y_hat, y)
+## Metrics
 
 def accuracy(batch, forward_callable, device):
     x, y = batch
@@ -159,6 +147,40 @@ class CNN(torch.nn.Module):
         return self.classifier(x)  # logits
 
 
+class SimSiam(torch.nn.Module):
+    '''Simple Siamese-Net.
+    backbone: torch module with a `features` property.
+    aug: random augmentation function.
+    '''
+    def __init__(self, backbone : torch.nn.Module, aug):
+        super().__init__()
+        d, wpool, fc_o = 4, 8, 128  # 16, 16, 512
+        self.aug = aug
+        self.f = nn.Sequential(
+            OrderedDict([('features', backbone.features),
+                         ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
+                         ('flatten', nn.Flatten(start_dim=1)),
+                         ('fc', fc(i=wpool * wpool * (8*d), o=fc_o)),]))
+        self.h = nn.Sequential(
+            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),  # bottleneck
+                         ('fc2', fc(i=fc_o//2, o=fc_o)),]))
+
+    def forward(self, x):
+        x1, x2 = self.aug(x), self.aug(x)  # sample random augmentations
+        z1, z2 = self.f(x1), self.f(x2)  # projections
+        p1, p2 = self.h(z1), self.h(z2)  # centroid predictions
+        return z1, z2, p1, p2
+
+#     def D(self, p, z):
+#         '''Negative cosine similarity.'''
+#         p = F.normalize(p, dim=1)  # l2-normalize
+#         z = F.normalize(z, dim=1)
+#         return -(p*z).sum(dim=1).mean()
+
+#     def loss(self, z1, z2, p1, p2):
+#         return D(p1, stopgrad(z2))/2 + D(p2, stopgrad(z1))/2
+
+
 ## Lightning modules
 
 class BaseLitModel(LightningModule):
@@ -172,7 +194,6 @@ class BaseLitModel(LightningModule):
         self.batch_size = batch_size
         self.flood_height = flood_height  # 0.03 # flood the loss
         self.loss_func = loss_func
-        #self.metrics = torch.nn.ModuleDict({'accuracy': Accuracy()})
         self.metrics = metrics
         self.metric_names, self.metric_funcs = zip(*metrics) if metrics else ((), ())
         print(f'Logging metrics: {list(self.metric_names)}')
@@ -183,11 +204,10 @@ class BaseLitModel(LightningModule):
 
     def loss(self, batch, flood_height : float = 0):
         loss = self.loss_func(batch, self.forward)
-        # with flooding, if applied
-        return flood(loss, flood_height) if flood_height > 0 else loss
+        if flood_height > 0: loss = flood(loss, flood_height)  # with flooding
+        return loss
 
     def step(self, batch, prefix : str = '', flood_height : float = 0):
-        #raise NotImplementedError()
         # Log loss
         loss = self.loss(batch, flood_height)
         self.log(f'{prefix}_loss', loss, **LOG_KWARGS)
@@ -195,7 +215,6 @@ class BaseLitModel(LightningModule):
         metric_results = [metric_func(batch, forward_callable=self.forward, device=self.device)
                           for metric_func in self.metric_funcs]
         for name, metric in zip(self.metric_names, metric_results):
-            #print(f'Logging {name}:{metric}')
             self.log(f'{prefix}_{name}', metric, **LOG_KWARGS)
         return loss
 
@@ -226,37 +245,3 @@ class BaseLitModel(LightningModule):
 #         super().__init__(loss_func=log_softmax,
 #                          metrics=[('acc', accuracy),]  # performance metrics (e.g. accuracy),
 #                          *args, **kwargs)
-
-
-# def SimSiam(torch.nn.Module):
-#     '''Simple siamese-net.
-#     backbone: torch module with a `features` property.
-#     aug: random augmentation function.
-#     '''
-#     def __init__(self, backbone : torch.nn.Module, aug):
-#         super().__init__()
-#         d, wpool, fc_o = 4, 8, 128  # 16, 16, 512
-#         self.aug = aug
-#         self.f = nn.Sequential(
-#             OrderedDict([('features', backbone.features),
-#                          ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
-#                          ('flatten', nn.Flatten(start_dim=1)),
-#                          ('fc', fc(i=wpool * wpool * (8*d), o=fc_o)),]))
-#         self.h = nn.Sequential(
-#             OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),
-#                          ('fc2', fc(i=fc_o//2, o=fc_o)),]))
-
-#     def D(self, p, z):
-#         '''Negative cosine similarity.'''
-#         p = F.normalize(p, dim=1)  # l2-normalize
-#         z = F.normalize(z, dim=1)
-#         return -(p*z).sum(dim=1).mean()
-
-#     def loss(self, z1, z2, p1, p2):
-#         return D(p1, stopgrad(z2))/2 + D(p2, stopgrad(z1))/2
-
-#     def forward(self, x):
-#         x1, x2 = self.aug(x), self.aug(x)  # random augmentations
-#         z1, z2 = self.f(x1), self.f(x2)  # projections
-#         p1, p2 = self.h(z1), self.h(z2)  # predictions
-#         return z1, z2, p1, p2
