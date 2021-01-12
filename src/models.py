@@ -3,15 +3,11 @@
 ## regular
 from collections import OrderedDict
 
-## Albumentations
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-
 ## PyTorch
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.optim import Adam, SGD
+from torch.optim import Adam  # , SGD
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 ## Lightning
@@ -19,32 +15,12 @@ import pytorch_lightning as pl
 from pytorch_lightning.core.lightning import LightningModule
 
 ## internal
-from src.dataset import alb_to_torch_aug
+from src.losses import flood
 
 
-## const
+## constants
 LOG_KWARGS = dict(
     #on_step=True, on_epoch=True, prog_bar=True, logger=True
-)
-AUG_KWARGS = dict(
-    border_mode=A.cv2.BORDER_CONSTANT, value=0, interpolation=A.cv2.INTER_LANCZOS4
-)
-
-AUG = alb_to_torch_aug(  # wrapper for pytorch-like behavior
-    A.Compose([
-        #A.RandomCrop(width=24, height=24),
-        #A.GridDistortion(p=0.5, distort_limit=.3, **AUG_KWARGS),
-        A.ElasticTransform(p=0.5, sigma=1, alpha=3, alpha_affine=0, **AUG_KWARGS),
-        A.ElasticTransform(p=0.5, sigma=1, alpha=1, alpha_affine=3, **AUG_KWARGS),
-        A.ShiftScaleRotate(p=0.5, scale_limit=.2, rotate_limit=0, **AUG_KWARGS),
-        A.ShiftScaleRotate(p=0.5, scale_limit=0, rotate_limit=25, **AUG_KWARGS),
-        #A.CoarseDropout(p=1.0, max_holes=8, max_height=4, max_width=4,
-        #                min_holes=1, min_height=4, min_width=4),
-        #A.RandomBrightnessContrast(p=0.2),
-        #A.Blur(blur_limit=4),
-        A.Normalize(mean=(0.0,), std=(1,)),#, max_pixel_value=255),
-        ToTensorV2()
-    ])
 )
 
 
@@ -77,7 +53,7 @@ def twoconv(i : int, o : int, k : int = 3, batchnorm : bool = True,  relu=nn.Lea
 
 def fc(i : int, o : int, relu=nn.LeakyReLU):
     '''Linear + ReLU + Dropout.
-    i: input channels, o: output channels, relu: relu type
+    i: input channels, o: output channels, relu: relu class
     '''
     return nn.Sequential(OrderedDict([
         ('linear', torch.nn.Linear(in_features=i, out_features=o)),
@@ -122,13 +98,13 @@ class MLP(torch.nn.Module):
 
 class CNN(torch.nn.Module):
     '''CNN based on VGG.'''
-    def __init__(self, C : int, num_classes : int):
+    def __init__(self, num_channels : int, num_classes : int):
         super().__init__()
         d = 16  # 4
         wpool = 16  # 8
         fc_o = 512  # 128
         self.features = nn.Sequential(
-            OrderedDict([('conv1', conv(i=C, o=d, k=3)),
+            OrderedDict([('conv1', conv(i=num_channels, o=d, k=3)),
                          ('conv2', conv(i=d, o=2*d, k=3)),
                          ('twoconv1', twoconv(2*d, 4*d, k=3)),
                          ('twoconv2', twoconv(4*d, 8*d, k=3)),
@@ -141,7 +117,7 @@ class CNN(torch.nn.Module):
                         ]))
 
     def forward(self, x):
-        x = self.features(x)
+        x = self.features(x[:, [0]])  # with only the first channel (in case of many augs)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         return self.classifier(x)  # logits
@@ -152,21 +128,23 @@ class SimSiam(torch.nn.Module):
     backbone: torch module with a `features` property.
     aug: random augmentation function.
     '''
-    def __init__(self, backbone : torch.nn.Module, aug):
+    def __init__(self, backbone : torch.nn.Module):  #, aug):
         super().__init__()
-        d, wpool, fc_o = 4, 8, 128  # 16, 16, 512
-        self.aug = aug
+        d, wpool, fc_o = 16, 8, 128  # 4, 16, 512
+        #self.aug = aug
         self.f = nn.Sequential(
             OrderedDict([('features', backbone.features),
                          ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
                          ('flatten', nn.Flatten(start_dim=1)),
-                         ('fc', fc(i=wpool * wpool * (8*d), o=fc_o)),]))
+                         ('fc', fc(i = wpool * wpool * (8*d), o = fc_o)),
+                        ]))
         self.h = nn.Sequential(
             OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),  # bottleneck
                          ('fc2', fc(i=fc_o//2, o=fc_o)),]))
 
     def forward(self, x):
-        x1, x2 = self.aug(x), self.aug(x)  # sample random augmentations
+        #import ipdb; ipdb.set_trace()
+        x1, x2 = x[:, [0]], x[:, [1]]  # two random augmentations
         z1, z2 = self.f(x1), self.f(x2)  # projections
         p1, p2 = self.h(z1), self.h(z2)  # centroid predictions
         return z1, z2, p1, p2
@@ -237,11 +215,3 @@ class BaseLitModel(LightningModule):
         return {'optimizer': self.optimizer,
                 'lr_scheduler': self.scheduler,
                 'monitor': 'val_loss',}
-
-
-# class LitModelClassifier(BaseLitModel):
-#     '''Derived Lightning module for classification.'''
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(loss_func=log_softmax,
-#                          metrics=[('acc', accuracy),]  # performance metrics (e.g. accuracy),
-#                          *args, **kwargs)
