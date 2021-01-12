@@ -6,24 +6,37 @@ import torch
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader, random_split
 
-try:
-    from torchvision import transforms as transform_lib
-    from torchvision.datasets import MNIST
-except ImportError:
-    warn('You want to use `torchvision` which is not installed yet,'  # pragma: no-cover
-         ' install it with `pip install torchvision`.')
-    _TORCHVISION_AVAILABLE = False
-else:
-    _TORCHVISION_AVAILABLE = True
+from torchvision import transforms as transform_lib
+from torchvision.datasets import MNIST
 
 
 def alb_to_torch_aug(aug):
     '''albumentations.Compose wrapper for PyTorch compatibility.'''
-    if type(aug) == A.Compose:
-        def wrapped_aug(x, *args, **kwargs):
-            return aug(image=A.np.array(x), *args, **kwargs)['image']
+    if type(aug) in [A.Compose or ComposeMany]:
+        def wrapped_aug(x):  # , *args, **kwargs):
+            #return aug(image=A.np.array(x), *args, **kwargs)['image']
+            return aug(image=A.np.array(x))['image']
         return wrapped_aug
     else: return aug
+
+
+# class ComposeMany(A.Compose):
+#     '''Class derived from A.Compose for sampling many augmentations of one image.'''
+#     def __init__(self, transforms, n_aug : int=1):  # , *args, **kwargs):
+#         '''n_aug: number of augmentations to sample'''
+#         super().__init__(transforms)  # , *args, **kwargs)
+#         self.n_aug = n_aug
+
+#     def __call__(self, image):  # , *args, **kwargs):
+#         import pdb; pdb.set_trace()
+#         print(type(image))
+#         return {'image':torch.cat(
+#                 [
+#                     #super(ComposeMany, self).__call__(image=image, *args, **kwargs)['image']
+#                     super(ComposeMany, self).__call__(image=image)['image']
+#                     for _ in range(self.n_aug)
+#                 ], dim=0)
+#         }
 
 
 class MNISTDataModule(LightningDataModule):
@@ -77,9 +90,6 @@ class MNISTDataModule(LightningDataModule):
             normalize: If true applies image normalize
         """
         super().__init__(*args, **kwargs)
-
-        if not _TORCHVISION_AVAILABLE:
-            raise ImportError('You want to use MNIST dataset loaded from `torchvision` which is not installed yet.')
 
         self.dims = (1, 28, 28)
         self.data_dir = data_dir
