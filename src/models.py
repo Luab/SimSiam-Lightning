@@ -3,18 +3,15 @@
 ## regular
 from collections import OrderedDict
 
-## PyTorch
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import Adam  # , SGD
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-## Lightning
 import pytorch_lightning as pl
 from pytorch_lightning.core.lightning import LightningModule
 
-## internal
 from src.losses import flood
 
 
@@ -70,6 +67,14 @@ def accuracy(batch, forward_callable, device):
     log_y_hat = F.log_softmax(logits, dim=1)  # log probability
     func = pl.metrics.Accuracy().to(device)
     return func(log_y_hat, y)
+
+
+def feature_std(batch, forward_callable, device):
+    x, _ = batch
+    z1, z2, p1, p2 = forward_callable(x)
+    #import ipdb; ipdb.set_trace()
+    z1 = F.normalize(z1, dim=1)
+    return z1.std(dim=1).mean(dim=0)  # B, d
 
 
 ## Architectures
