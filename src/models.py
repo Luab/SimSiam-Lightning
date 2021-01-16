@@ -72,9 +72,10 @@ def accuracy(batch, forward_callable, device):
 def feature_std(batch, forward_callable, device):
     x, _ = batch
     z1, z2, p1, p2 = forward_callable(x)
-    #z1 = F.normalize(z1, dim=1)
-    p1 = F.normalize(p1, dim=1)
-    return p1.std(dim=1).mean(dim=0)  # (B, d)
+    z1 = F.normalize(z1, dim=1)
+    #p1 = F.normalize(p1, dim=1)
+    #print(z1.shape)
+    return z1.std(dim=0).mean()  # (B, d)
 
 
 ## Architectures
@@ -179,18 +180,18 @@ class BaseLitModel(LightningModule):
     def __init__(self, datamodule=None, backbone=None, loss_func=None, metrics : tuple = (),
                  lr : float = 1e-3,
                  flood_height: float = 0,
-                 #batch_size : int = 32,
                  *args, **kwargs
                 ):
         super().__init__(*args, **kwargs)
         self.dm = datamodule
         self.backbone = backbone  # model architecture
         self.lr = lr  # learning rate
-        #self.batch_size = batch_size
         self.flood_height = flood_height  # 0.03 # flood the loss
         self.loss_func = loss_func
         self.metrics = metrics
         self.metric_names, self.metric_funcs = zip(*metrics) if metrics else ((), ())
+        #self.example_input_array = torch.rand((1,) + self.dm.dims)
+        self.example_input_array = self.dm.train_dataloader().dataset.dataset[0][0][None]
         print(f'Logging metrics: {list(self.metric_names)}')
         self.save_hyperparameters()  # save hyper-parameters to self.hparams, and log them
 
@@ -219,6 +220,7 @@ class BaseLitModel(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
+        #import ipdb; ipdb.set_trace()
         self.step(batch, prefix='val', flood_height=0)
 
     def test_step(self, batch, batch_idx):
