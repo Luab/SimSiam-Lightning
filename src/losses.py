@@ -27,7 +27,7 @@ def negcosim(p, z):
     '''Negative cosine similarity.'''
     p = F.normalize(p, dim=1)  # l2-normalize
     z = F.normalize(z, dim=1)
-    return -(p*z).sum(dim=1).mean()
+    return -(p*z).sum(dim=1).mean(dim=0)
 
 
 def simsiam_loss(batch, forward_callable):

@@ -72,15 +72,16 @@ def accuracy(batch, forward_callable, device):
 def feature_std(batch, forward_callable, device):
     x, _ = batch
     z1, z2, p1, p2 = forward_callable(x)
-    #import ipdb; ipdb.set_trace()
-    z1 = F.normalize(z1, dim=1)
-    return z1.std(dim=1).mean(dim=0)  # B, d
+    #z1 = F.normalize(z1, dim=1)
+    p1 = F.normalize(p1, dim=1)
+    return p1.std(dim=1).mean(dim=0)  # (B, d)
 
 
 ## Architectures
 
 class MLP(torch.nn.Module):
     '''Multilayer perceptron.'''
+
     def __init__(self, C : int, W : int, H : int,
                  num_classes : int, num_layer_1 : int = 128, num_layer_2 : int = 256):
         super().__init__()
@@ -103,20 +104,22 @@ class MLP(torch.nn.Module):
 
 class CNN(torch.nn.Module):
     '''CNN based on VGG.'''
+
     def __init__(self, num_channels : int, num_classes : int):
         super().__init__()
-        d = 16  # 4
-        wpool = 16  # 8
-        fc_o = 512  # 128
+        k = 3
+        d = 4  # 16
+        wpool = 1  # 16
+        fc_o = wpool * wpool * (8 * d)  # 128  # 512
         self.features = nn.Sequential(
-            OrderedDict([('conv1', conv(i=num_channels, o=d, k=3)),
-                         ('conv2', conv(i=d, o=2*d, k=3)),
-                         ('twoconv1', twoconv(2*d, 4*d, k=3)),
-                         ('twoconv2', twoconv(4*d, 8*d, k=3)),
+            OrderedDict([('conv1', conv(i=num_channels, o=d, k=k)),
+                         ('conv2', conv(i=d, o=2*d, k=k)),
+                         ('twoconv1', twoconv(2*d, 4*d, k=k)),
+                         ('twoconv2', twoconv(4*d, 8*d, k=k)),
                         ]))
         self.avgpool = nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))
         self.classifier = nn.Sequential(  # two fc layers that output the logits
-            OrderedDict([('fc1', fc(i=wpool * wpool * (8*d), o=fc_o//2)),
+            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),  # bottle-neck
                          ('fc2', fc(i=fc_o//2, o=fc_o)),
                          ('linear', torch.nn.Linear(fc_o, num_classes)),
                         ]))
@@ -129,26 +132,30 @@ class CNN(torch.nn.Module):
 
 
 class SimSiam(torch.nn.Module):
-    '''Simple Siamese-Net.
-    backbone: torch module with a `features` property.
-    aug: random augmentation function.
     '''
+    Simple Siamese-Net.
+
+    Args:
+        backbone: torch module with a `features` property.
+        aug: random augmentation function.
+    '''
+
     def __init__(self, backbone : torch.nn.Module):  #, aug):
         super().__init__()
-        d, wpool, fc_o = 16, 8, 128  # 4, 16, 512
-        #self.aug = aug
+        d = 4
+        wpool = 1
+        fc_o = wpool * wpool * (8 * d)  # 4, 16, 512
         self.f = nn.Sequential(
             OrderedDict([('features', backbone.features),
                          ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
                          ('flatten', nn.Flatten(start_dim=1)),
-                         ('fc', fc(i = wpool * wpool * (8*d), o = fc_o)),
+                         ('fc', fc(i=fc_o, o=fc_o)),
                         ]))
         self.h = nn.Sequential(
             OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),  # bottleneck
                          ('fc2', fc(i=fc_o//2, o=fc_o)),]))
 
     def forward(self, x):
-        #import ipdb; ipdb.set_trace()
         x1, x2 = x[:, [0]], x[:, [1]]  # two random augmentations
         z1, z2 = self.f(x1), self.f(x2)  # projections
         p1, p2 = self.h(z1), self.h(z2)  # centroid predictions
@@ -168,13 +175,18 @@ class SimSiam(torch.nn.Module):
 
 class BaseLitModel(LightningModule):
     '''A module for all those nice PyTorch-Lightning features.'''
+
     def __init__(self, datamodule=None, backbone=None, loss_func=None, metrics : tuple = (),
-                 lr : float = 1e-3, batch_size : int = 32, flood_height: float = 0):
-        super().__init__()
+                 lr : float = 1e-3,
+                 flood_height: float = 0,
+                 #batch_size : int = 32,
+                 *args, **kwargs
+                ):
+        super().__init__(*args, **kwargs)
         self.dm = datamodule
         self.backbone = backbone  # model architecture
         self.lr = lr  # learning rate
-        self.batch_size = batch_size
+        #self.batch_size = batch_size
         self.flood_height = flood_height  # 0.03 # flood the loss
         self.loss_func = loss_func
         self.metrics = metrics
@@ -191,10 +203,10 @@ class BaseLitModel(LightningModule):
         return loss
 
     def step(self, batch, prefix : str = '', flood_height : float = 0):
-        # Log loss
+        ## Log loss
         loss = self.loss(batch, flood_height)
         self.log(f'{prefix}_loss', loss, **LOG_KWARGS)
-        # Log metrics
+        ## Log metrics
         metric_results = [metric_func(batch, forward_callable=self.forward, device=self.device)
                           for metric_func in self.metric_funcs]
         for name, metric in zip(self.metric_names, metric_results):
