@@ -1,6 +1,5 @@
 # models.py
 
-## regular
 from collections import OrderedDict
 
 import torch
@@ -15,7 +14,7 @@ from pytorch_lightning.core.lightning import LightningModule
 from src.losses import flood
 
 
-## constants
+## Constants
 LOG_KWARGS = dict(
     #on_step=True, on_epoch=True, prog_bar=True, logger=True
 )
@@ -24,37 +23,67 @@ LOG_KWARGS = dict(
 # TODO: tests
 ## Module functions
 
-def conv(i : int, o : int, k : int=3,
-         batchnorm : bool = True, relu=nn.LeakyReLU, maxpool : bool = True):
-    '''Conv (+ BatchNorm) + ReLU (+ MaxPool)
-    i: input channels, o: output channels, k: kernel size, relu: relu type
+def conv(i : int, o : int, k : int = 3,
+         bn : bool = True, relu=nn.LeakyReLU, maxpool : bool = False):
     '''
+    Conv2d (+ BatchNorm2d) (+ ReLU) (+ MaxPool2d).
+
+    Args:
+        i: input channels
+        o: output channels
+        k: kernel size
+        bn: apply batch normalization.
+        relu: relu type. If False or None, nn.Identity will be used instead.
+        maxpool: apply maxpooling (2x2) at the end.
+    '''
+
     convblock = OrderedDict([
         ('conv2d', nn.Conv2d(in_channels=i, out_channels=o, kernel_size=k, padding=k//2)),
+        ('bn', nn.BatchNorm2d(num_features=o) if bn else nn.Identity()),
+        ('relu', relu(inplace=True) if relu else nn.Identity()),
+        ('maxpool', nn.MaxPool2d(kernel_size=2, stride=2) if maxpool else nn.Identity()),
     ])
-    if batchnorm: convblock['bn'] = nn.BatchNorm2d(num_features=o)
-    convblock['relu'] = relu(inplace=True)
-    if maxpool: convblock['maxpool'] = nn.MaxPool2d(kernel_size=2, stride=2)
     return nn.Sequential(convblock)
 
 
-def twoconv(i : int, o : int, k : int = 3, batchnorm : bool = True,  relu=nn.LeakyReLU):
-    '''Conv (+ BatchNorm) + ReLU + Conv (+ BatchNorm) + ReLU + MaxPool
-    i: input channels, o: output channels, k: kernel size, relu: relu type
+def twoconv(i : int, o : int, k : int = 3,
+            bn : bool = True, relu=nn.LeakyReLU, maxpool : bool = False):
     '''
+    Conv2d (+ BatchNorm2d) (+ ReLU) +
+    Conv2d (+ BatchNorm2d) (+ ReLU) (+ MaxPool2d).
+
+    Args:
+        i: input channels
+        o: output channels
+        k: kernel size
+        bn: apply batch normalization.
+        relu: relu type. If False or None, nn.Identity will be used.
+        maxpool: apply maxpooling (2x2) at the end.
+    '''
+
+    relu = relu or nn.Identity
     return nn.Sequential(OrderedDict([
-        ('conv1', conv(i, o, k, batchnorm=batchnorm, relu=relu, maxpool=False)),
-        ('conv2', conv(o, o, k, batchnorm=batchnorm, relu=relu, maxpool=True)),
+        ('conv1', conv(i, o, k, bn, relu, maxpool=False)),
+        ('conv2', conv(o, o, k, bn, relu, maxpool=maxpool)),
     ]))
 
 
-def fc(i : int, o : int, relu=nn.LeakyReLU, p_dropout=0.5):
-    '''Linear + ReLU + Dropout.
-    i: input channels, o: output channels, relu: relu class
+def fc(i : int, o : int, bn : bool = True, relu=nn.LeakyReLU, p_dropout=0.5):
     '''
+    Linear (+ BatchNorm1d) (+ ReLU) (+ Dropout).
+
+    Args:
+        i: input channels
+        o: output channels
+        bn: apply batch normalization.
+        relu: relu type. If False or None, nn.Identity will be used instead.
+        p_dropout: probability of applying dropout per element.
+    '''
+
     return nn.Sequential(OrderedDict([
         ('linear', torch.nn.Linear(in_features=i, out_features=o)),
-        ('relu', relu(inplace=True)),
+        ('bn', nn.BatchNorm1d(num_features=o) if bn else nn.Identity()),
+        ('relu', relu(inplace=True) if relu else nn.Identity()),
         ('dropout', nn.Dropout(p=p_dropout)),
     ]))
 
@@ -62,20 +91,22 @@ def fc(i : int, o : int, relu=nn.LeakyReLU, p_dropout=0.5):
 ## Metrics
 
 def accuracy(batch, forward_callable, device):
+    '''To track the accuracy (% classified correctly).'''
     x, y = batch
     logits = forward_callable(x)
-    log_y_hat = F.log_softmax(logits, dim=1)  # log probability
+    ## Log probability
+    log_y_hat = F.log_softmax(logits, dim=1)
     func = pl.metrics.Accuracy().to(device)
     return func(log_y_hat, y)
 
 
 def feature_std(batch, forward_callable, device):
+    '''To track the standard deviation of a feature across samples, averaged across features.'''
     x, _ = batch
     z1, z2, p1, p2 = forward_callable(x)
     z1 = F.normalize(z1, dim=1)
-    #p1 = F.normalize(p1, dim=1)
-    #print(z1.shape)
-    return z1.std(dim=0).mean()  # (B, d)
+    ## (B, d)
+    return z1.std(dim=0).mean()
 
 
 ## Architectures
@@ -104,62 +135,99 @@ class MLP(torch.nn.Module):
 
 
 class CNN(torch.nn.Module):
-    '''CNN based on VGG.'''
+    '''CNN based on the VGG net.'''
 
-    def __init__(self, num_channels : int, num_classes : int, p_dropout : float = 0.5):
+    def __init__(self, num_channels : int, num_classes : int,
+                 maxpool : bool = True, p_dropout : float = 0.5):
         super().__init__()
+
+        ## Kernel size.
         k = 3
-        d = 4  # 16
-        wpool = 1  # 16
-        fc_o = wpool * wpool * (8 * d)  # 128  # 512
+        ## Channel multiplier. output channels = d x input channels.
+        d = 4
+        ## Average-pooling output size.
+        wpool = 1 if maxpool else 7 # 16
+        ## Input features at the fc layer.
+        fc_d = (8 * d) * wpool * wpool  # 128  # 512
+
+        ## If maxpool is True, there will be H x W // 2**4 features.
         self.features = nn.Sequential(
-            OrderedDict([('conv1', conv(i=num_channels, o=d, k=k)),
-                         ('conv2', conv(i=d, o=2*d, k=k)),
-                         ('twoconv1', twoconv(2*d, 4*d, k=k)),
-                         ('twoconv2', twoconv(4*d, 8*d, k=k)),
+            OrderedDict([('conv1', conv(i=num_channels, o=d, k=k, maxpool=maxpool)),  # 14x14
+                         ('conv2', conv(i=d, o=2*d, k=k, maxpool=maxpool)),  # 7x7
+                         ('twoconv1', twoconv(i=2*d, o=4*d, k=k, maxpool=maxpool)),  # 3x3
+                         ('twoconv2', twoconv(i=4*d, o=8*d, k=k, maxpool=maxpool)),  # 1x1
                         ]))
         self.avgpool = nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))
-        self.classifier = nn.Sequential(  # two fc layers that output the logits
-            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2, p_dropout=p_dropout)),  # bottle-neck
-                         ('fc2', fc(i=fc_o//2, o=fc_o, p_dropout=p_dropout)),
-                         ('linear', torch.nn.Linear(fc_o, num_classes)),
+        ## A bottleneck of three fc layers that output the logits.
+        self.classifier = nn.Sequential(
+            OrderedDict([('fc1', fc(i=fc_d, o=fc_d//4, p_dropout=p_dropout)),
+                         ('fc2', fc(i=fc_d//4, o=fc_d, p_dropout=p_dropout)),
+                         ('linear', torch.nn.Linear(fc_d, num_classes))
                         ]))
 
     def forward(self, x):
-        x = self.features(x[:, [0]])  # with only the first channel (in case of many augs)
+        ## With only the first channel (in case of many augs).
+        x = self.features(x[:, [0]])
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        return self.classifier(x)  # logits
+        ## Logits
+        return self.classifier(x)
 
 
 class SimSiam(torch.nn.Module):
     '''
-    Simple Siamese-Net.
+    Simple Siamese Net.
 
     Args:
         backbone: torch module with a `features` property.
         aug: random augmentation function.
     '''
 
-    def __init__(self, backbone : torch.nn.Module, p_dropout : float = 0.5):  #, aug):
+    def __init__(self,
+                 backbone : torch.nn.Module,
+                 projection_d : int = 2048,
+                 prediction_d : int = 2048,
+                 p_dropout : float = 0.0):
         super().__init__()
+
+        ## Output channels = d x input channels.
         d = 4
+        ## Average pooling output size.
         wpool = 1
-        fc_o = wpool * wpool * (8 * d)  # 4, 16, 512
-        self.f = nn.Sequential(
-            OrderedDict([('features', backbone.features),
-                         ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
-                         ('flatten', nn.Flatten(start_dim=1)),
-                         ('fc', fc(i=fc_o, o=fc_o, p_dropout=p_dropout)),
+        ## Input, hidden, output features of the projection MLP.
+        fc_i = (8 * d) * wpool * wpool  # 4, 16, 512
+        fc_d = projection_d
+        fc_o = prediction_d
+
+        self.backbone = backbone
+
+        ## Three fc layers that output the projection.
+        self.projection_mlp = nn.Sequential(
+            OrderedDict([('fc1', fc(i=fc_i, o=fc_d, bn=True, p_dropout=p_dropout)),
+                         ('fc2', fc(i=fc_d, o=fc_d, bn=True, p_dropout=p_dropout)),
+                         ('fc3', fc(i=fc_d, o=fc_o, bn=True, relu=None, p_dropout=p_dropout)),
                         ]))
+
+        ## A bottleneck of two fc layers that output the prediction.
+        self.prediction_mlp = nn.Sequential(
+            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//4, bn=True, p_dropout=p_dropout)),
+                         ('fc2', fc(i=fc_o//4, o=fc_o, bn=False, relu=None, p_dropout=p_dropout)),
+                        ]))
+
+        self.f = nn.Sequential(
+            OrderedDict([('features', self.backbone.features),
+                         ('avgpool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
+                         ('flatten', nn.Flatten(start_dim=1)),
+                         ('projection_mlp', self.projection_mlp),
+                        ]))
+
         self.h = nn.Sequential(
-            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2, p_dropout=p_dropout)),  # bottleneck
-                         ('fc2', fc(i=fc_o//2, o=fc_o, p_dropout=p_dropout)),]))
+            OrderedDict([('prediction_mlp', self.prediction_mlp),]))
 
     def forward(self, x):
-        x1, x2 = x[:, [0]], x[:, [1]]  # two random augmentations
-        z1, z2 = self.f(x1), self.f(x2)  # projections
-        p1, p2 = self.h(z1), self.h(z2)  # centroid predictions
+        x1, x2 = x[:, [0]], x[:, [1]]  ## Two random augmentations
+        z1, z2 = self.f(x1), self.f(x2)  ## Projections
+        p1, p2 = self.h(z1), self.h(z2)  ## Centroid predictions
         return z1, z2, p1, p2
 
 #     def D(self, p, z):
@@ -184,23 +252,27 @@ class BaseLitModel(LightningModule):
                 ):
         super().__init__(*args, **kwargs)
         self.dm = datamodule
-        self.backbone = backbone  # model architecture
-        self.lr = lr  # learning rate
-        self.flood_height = flood_height  # 0.03 # flood the loss
+        ## Backbone architecture
+        self.backbone = backbone
+        ## Learning rate
+        self.lr = lr
+        ## Flood the loss
+        self.flood_height = flood_height  # 0.03
         self.loss_func = loss_func
         self.metrics = metrics
         self.metric_names, self.metric_funcs = zip(*metrics) if metrics else ((), ())
-        #self.example_input_array = torch.rand((1,) + self.dm.dims)
         self.example_input_array = self.dm.train_dataloader().dataset.dataset[0][0][None]
         print(f'Logging metrics: {list(self.metric_names)}')
-        self.save_hyperparameters()  # save hyper-parameters to self.hparams, and log them
+        ## Save hyper-parameters to self.hparams, and log them.
+        self.save_hyperparameters()
 
     def forward(self, x):
         return self.backbone(x)
 
     def loss(self, batch, flood_height : float = 0):
         loss = self.loss_func(batch, self.forward)
-        if flood_height > 0: loss = flood(loss, flood_height)  # with flooding
+        ## With flooding
+        if flood_height > 0: loss = flood(loss, flood_height)
         return loss
 
     def step(self, batch, prefix : str = '', flood_height : float = 0):
@@ -220,7 +292,6 @@ class BaseLitModel(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        #import ipdb; ipdb.set_trace()
         self.step(batch, prefix='val', flood_height=0)
 
     def test_step(self, batch, batch_idx):
@@ -231,6 +302,8 @@ class BaseLitModel(LightningModule):
         #self.optimizer = SGD(self.parameters(), lr=self.lr, nesterov=True, momentum=0.9)
         self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5,
                                            patience=10, cooldown=0)
-        return {'optimizer': self.optimizer,
-                'lr_scheduler': self.scheduler,
-                'monitor': 'val_loss',}
+        return {
+            'optimizer': self.optimizer,
+            'lr_scheduler': self.scheduler,
+            'monitor': 'val_loss'
+        }
