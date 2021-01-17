@@ -48,14 +48,14 @@ def twoconv(i : int, o : int, k : int = 3, batchnorm : bool = True,  relu=nn.Lea
     ]))
 
 
-def fc(i : int, o : int, relu=nn.LeakyReLU):
+def fc(i : int, o : int, relu=nn.LeakyReLU, p_dropout=0.5):
     '''Linear + ReLU + Dropout.
     i: input channels, o: output channels, relu: relu class
     '''
     return nn.Sequential(OrderedDict([
         ('linear', torch.nn.Linear(in_features=i, out_features=o)),
         ('relu', relu(inplace=True)),
-        ('dropout', nn.Dropout(p=0.5)),
+        ('dropout', nn.Dropout(p=p_dropout)),
     ]))
 
 
@@ -106,7 +106,7 @@ class MLP(torch.nn.Module):
 class CNN(torch.nn.Module):
     '''CNN based on VGG.'''
 
-    def __init__(self, num_channels : int, num_classes : int):
+    def __init__(self, num_channels : int, num_classes : int, p_dropout : float = 0.5):
         super().__init__()
         k = 3
         d = 4  # 16
@@ -120,8 +120,8 @@ class CNN(torch.nn.Module):
                         ]))
         self.avgpool = nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))
         self.classifier = nn.Sequential(  # two fc layers that output the logits
-            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),  # bottle-neck
-                         ('fc2', fc(i=fc_o//2, o=fc_o)),
+            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2, p_dropout=p_dropout)),  # bottle-neck
+                         ('fc2', fc(i=fc_o//2, o=fc_o, p_dropout=p_dropout)),
                          ('linear', torch.nn.Linear(fc_o, num_classes)),
                         ]))
 
@@ -141,7 +141,7 @@ class SimSiam(torch.nn.Module):
         aug: random augmentation function.
     '''
 
-    def __init__(self, backbone : torch.nn.Module):  #, aug):
+    def __init__(self, backbone : torch.nn.Module, p_dropout : float = 0.5):  #, aug):
         super().__init__()
         d = 4
         wpool = 1
@@ -150,11 +150,11 @@ class SimSiam(torch.nn.Module):
             OrderedDict([('features', backbone.features),
                          ('avgpoool', nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))),
                          ('flatten', nn.Flatten(start_dim=1)),
-                         ('fc', fc(i=fc_o, o=fc_o)),
+                         ('fc', fc(i=fc_o, o=fc_o, p_dropout=p_dropout)),
                         ]))
         self.h = nn.Sequential(
-            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2)),  # bottleneck
-                         ('fc2', fc(i=fc_o//2, o=fc_o)),]))
+            OrderedDict([('fc1', fc(i=fc_o, o=fc_o//2, p_dropout=p_dropout)),  # bottleneck
+                         ('fc2', fc(i=fc_o//2, o=fc_o, p_dropout=p_dropout)),]))
 
     def forward(self, x):
         x1, x2 = x[:, [0]], x[:, [1]]  # two random augmentations
