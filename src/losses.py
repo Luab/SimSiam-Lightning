@@ -22,7 +22,6 @@ def stopgrad(x):
     return x.detach()
 
 
-# BUG? dim=2
 def negcosim(p, z):
     '''Negative cosine similarity.'''
     p = F.normalize(p, dim=1)  # l2-normalize
@@ -33,5 +32,5 @@ def negcosim(p, z):
 def simsiam_loss(batch, forward_callable):
     x, y = batch
     z1, z2, p1, p2 = forward_callable(x)
-    return (negcosim(p1, z2) + negcosim(p2, z1)) / 2
-    #return (negcosim(p1, stopgrad(z2)) + negcosim(p2, stopgrad(z1))) / 2
+    #return (negcosim(p1, z2) + negcosim(p2, z1)) / 2
+    return (negcosim(p1, stopgrad(z2)) + negcosim(p2, stopgrad(z1))) / 2
