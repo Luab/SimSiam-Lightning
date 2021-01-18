@@ -264,7 +264,7 @@ class BaseLitModel(LightningModule):
         self.lr = lr
         ## Flood the loss
         self.flood_height = flood_height  # 0.03
-        self.optimizer = optimizer
+        self.optimizer_name = optimizer
         self.loss_func = loss_func
         self.metrics = metrics
         self.metric_names, self.metric_funcs = zip(*metrics) if metrics else ((), ())
@@ -305,9 +305,9 @@ class BaseLitModel(LightningModule):
         self.step(batch, prefix='test', flood_height=0)
 
     def configure_optimizers(self):
-        if self.optimizer == 'adam':
+        if self.optimizer_name == 'adam':
             self.optimizer = Adam(self.parameters(), lr=self.lr)
-        elif self.optimizer == 'sgd':
+        elif self.optimizer_name == 'sgd':
             self.optimizer = SGD(self.parameters(), lr=self.lr, nesterov=True, momentum=0.9)
         else: raise NotImplemented
         self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5,
