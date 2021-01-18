@@ -5,7 +5,7 @@ from collections import OrderedDict
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.optim import Adam  # , SGD
+from torch.optim import Adam, SGD
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import pytorch_lightning as pl
@@ -138,15 +138,19 @@ class CNN(torch.nn.Module):
     '''CNN based on the VGG net.'''
 
     def __init__(self, num_channels : int, num_classes : int,
-                 maxpool : bool = True, p_dropout : float = 0.5):
+                 maxpool : bool = True,
+                 wpool : int = 5,
+                 p_dropout : float = 0.5):
         super().__init__()
 
         ## Kernel size.
         k = 3
         ## Channel multiplier. output channels = d x input channels.
-        d = 4
+        d = 2
         ## Average-pooling output size.
-        wpool = 1 if maxpool else 7 # 16
+        self.maxpool = maxpool
+        wpool = 1 if maxpool else wpool # 16
+        self.wpool = wpool
         ## Input features at the fc layer.
         fc_d = (8 * d) * wpool * wpool  # 128  # 512
 
@@ -160,8 +164,8 @@ class CNN(torch.nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(output_size=(wpool, wpool))
         ## A bottleneck of three fc layers that output the logits.
         self.classifier = nn.Sequential(
-            OrderedDict([('fc1', fc(i=fc_d, o=fc_d//4, p_dropout=p_dropout)),
-                         ('fc2', fc(i=fc_d//4, o=fc_d, p_dropout=p_dropout)),
+            OrderedDict([('fc1', fc(i=fc_d, o=fc_d//8, p_dropout=p_dropout)),
+                         ('fc2', fc(i=fc_d//8, o=fc_d, p_dropout=p_dropout)),
                          ('linear', torch.nn.Linear(fc_d, num_classes))
                         ]))
 
@@ -191,9 +195,10 @@ class SimSiam(torch.nn.Module):
         super().__init__()
 
         ## Output channels = d x input channels.
-        d = 4
+        d = 2
         ## Average pooling output size.
-        wpool = 1
+        #wpool = 1 if backbone.maxpool else backbone.wpool # 16
+        wpool = backbone.wpool
         ## Input, hidden, output features of the projection MLP.
         fc_i = (8 * d) * wpool * wpool  # 4, 16, 512
         fc_d = projection_d
@@ -248,6 +253,7 @@ class BaseLitModel(LightningModule):
     def __init__(self, datamodule=None, backbone=None, loss_func=None, metrics : tuple = (),
                  lr : float = 1e-3,
                  flood_height: float = 0,
+                 optimizer: str = 'adam',
                  *args, **kwargs
                 ):
         super().__init__(*args, **kwargs)
@@ -258,6 +264,7 @@ class BaseLitModel(LightningModule):
         self.lr = lr
         ## Flood the loss
         self.flood_height = flood_height  # 0.03
+        self.optimizer = optimizer
         self.loss_func = loss_func
         self.metrics = metrics
         self.metric_names, self.metric_funcs = zip(*metrics) if metrics else ((), ())
@@ -298,8 +305,11 @@ class BaseLitModel(LightningModule):
         self.step(batch, prefix='test', flood_height=0)
 
     def configure_optimizers(self):
-        self.optimizer = Adam(self.parameters(), lr=self.lr)
-        #self.optimizer = SGD(self.parameters(), lr=self.lr, nesterov=True, momentum=0.9)
+        if self.optimizer == 'adam':
+            self.optimizer = Adam(self.parameters(), lr=self.lr)
+        elif self.optimizer == 'sgd':
+            self.optimizer = SGD(self.parameters(), lr=self.lr, nesterov=True, momentum=0.9)
+        else: raise NotImplemented
         self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5,
                                            patience=10, cooldown=0)
         return {
