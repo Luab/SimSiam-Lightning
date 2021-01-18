@@ -1,11 +1,26 @@
+import torch
+
 from utils import mnist_data, lit_model
-from models import CNN, BaseLitModel
+from models import CNN, BaseLitModel, SimSiam
 
 
 def test_CNN():
     cnn = CNN(num_channels=1, num_classes=10, maxpool=True)
     cnn = CNN(num_channels=1, num_classes=10, maxpool=False)
     cnn = CNN(num_channels=1, num_classes=10, maxpool=True, p_dropout=0.0)
+
+
+def test_SimSiam():
+    cnn = CNN(num_channels=1, num_classes=10, maxpool=False, wpool=5, p_dropout=0.0)
+    simsiam = SimSiam(backbone=cnn, p_dropout=0.0)
+    return simsiam
+
+
+def test_SimSiam_forward():
+    simsiam = test_SimSiam()
+    ## BatchNorm needs more than 1 sample to estimate the std.
+    x = torch.rand(32, 2, 28, 28)
+    simsiam(x)
 
 
 def test_pl_model():
