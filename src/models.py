@@ -197,7 +197,6 @@ class SimSiam(torch.nn.Module):
         ## Output channels = d x input channels.
         d = 2
         ## Average pooling output size.
-        #wpool = 1 if backbone.maxpool else backbone.wpool # 16
         wpool = backbone.wpool
         ## Input, hidden, output features of the projection MLP.
         fc_i = (8 * d) * wpool * wpool  # 4, 16, 512
@@ -227,22 +226,15 @@ class SimSiam(torch.nn.Module):
                         ]))
 
         self.h = nn.Sequential(
-            OrderedDict([('prediction_mlp', self.prediction_mlp),]))
+            OrderedDict([
+                ('prediction_mlp', self.prediction_mlp),
+            ]))
 
     def forward(self, x):
         x1, x2 = x[:, [0]], x[:, [1]]  ## Two random augmentations
         z1, z2 = self.f(x1), self.f(x2)  ## Projections
         p1, p2 = self.h(z1), self.h(z2)  ## Centroid predictions
         return z1, z2, p1, p2
-
-#     def D(self, p, z):
-#         '''Negative cosine similarity.'''
-#         p = F.normalize(p, dim=1)  # l2-normalize
-#         z = F.normalize(z, dim=1)
-#         return -(p*z).sum(dim=1).mean()
-
-#     def loss(self, z1, z2, p1, p2):
-#         return D(p1, stopgrad(z2))/2 + D(p2, stopgrad(z1))/2
 
 
 ## Lightning modules
