@@ -1,11 +1,18 @@
 # callbacks.py
 
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
 import torch
 from torch.nn import functional as F
 
 from pytorch_lightning.callbacks import Callback
 
 import wandb
+
+from src.dataset import ComposeMany  #, MNISTDataModule2
+from src.utils import knn_monitor
+
 
 
 class ImagePredictionLogger(Callback):
@@ -15,7 +22,6 @@ class ImagePredictionLogger(Callback):
         super().__init__()
         self.n_samples = n_samples
         self.x, self.y = next(iter(dataloader))
-        #self.x, self.y = samples
 
     def get_pred_probs(self, pl_module):
         '''Get prediction probabilities for `self.samples`.'''
@@ -25,9 +31,9 @@ class ImagePredictionLogger(Callback):
         probs = torch.max(F.softmax(logits, dim=1), -1).values
         #probs = torch.max(probs, -1).values
         preds = torch.argmax(logits, -1)
-        # Sort the validation predictions by wrong probability.
-        # See if classes match. Wrong classes have a minus sign.
-        # Then rank by prob.
+        ## Sort the validation predictions by wrong probability.
+        ## See if classes match. Wrong classes have a minus sign.
+        ## Then rank by prob.
         sign_correct = 2*(preds == y) - 1  # 1 correct / -1 incorrect
         _, ix_sorted = torch.sort(probs * sign_correct)
         ix = ix_sorted[:self.n_samples]
@@ -35,7 +41,7 @@ class ImagePredictionLogger(Callback):
 
     def on_validation_epoch_end(self, trainer, pl_module):
         x, preds, probs, y = self.get_pred_probs(pl_module)
-        # Log the images as wandb Image
+        ## Log the images as wandb Image
         trainer.logger.experiment.log(
             {
                 "examples":[
@@ -44,3 +50,16 @@ class ImagePredictionLogger(Callback):
                 ]
             }
         )
+
+
+class knnMonitorLogger(Callback):
+    def __init__(self, memory_dataloader, test_dataloader, knn_k, knn_t=1):
+        super().__init__()
+        self.memory_dataloader = memory_dataloader
+        self.test_dataloader = test_dataloader
+        self.knn_k = knn_k
+        self.knn_t = knn_t
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        knn_monitor(pl_module.backbone.f, self.memory_dataloader, self.test_dataloader,
+                    knn_k=self.knn_k, device=pl_module.device, epoch='')
