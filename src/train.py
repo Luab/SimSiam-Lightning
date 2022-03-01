@@ -14,6 +14,8 @@ import torchvision.transforms as T
 import wandb
 wandb.login()
 
+import cv2
+
 ## internal
 from src.callbacks import ImagePredictionLogger
 from src.dataset import ComposeMany, MNISTDataModule2, ComposeManyTorch
@@ -25,8 +27,8 @@ def cli_main():
     pl.seed_everything(1234)
 
     ## Augmentator
-    AUG_KWARGS = dict(border_mode=A.cv2.BORDER_CONSTANT, value=0,
-                      interpolation=A.cv2.INTER_LANCZOS4)
+    AUG_KWARGS = dict(border_mode=cv2.BORDER_CONSTANT, value=0,
+                      interpolation=cv2.INTER_LANCZOS4)
 
 #     transforms = ComposeMany([
 #         #A.ElasticTransform(p=0.5, sigma=1, alpha=3, alpha_affine=0, **AUG_KWARGS),

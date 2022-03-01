@@ -3,6 +3,7 @@ import torch
 import torchvision.transforms as T
 from pl_bolts.datamodules.mnist_datamodule import MNISTDataModule  #, LightningDataModule
 
+import numpy as np
 
 
 class ComposeMany(A.Compose):
@@ -18,7 +19,7 @@ class ComposeMany(A.Compose):
 
     def __call__(self, image, *args, **kwargs):
         image = torch.cat([
-            super(ComposeMany, self).__call__(image=A.np.array(image), *args, **kwargs)['image']
+            super(ComposeMany, self).__call__(image=np.array(image), *args, **kwargs)['image']
             for _ in range(self.n_aug)
         ], dim=0)
         return image
