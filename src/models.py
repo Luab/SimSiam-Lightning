@@ -13,6 +13,7 @@ from pytorch_lightning.core.lightning import LightningModule
 
 from src.losses import flood
 
+import torchmetrics
 
 ## Constants
 LOG_KWARGS = dict(
@@ -96,7 +97,7 @@ def accuracy(batch, forward_callable, device):
     logits = forward_callable(x)
     ## Log probability
     log_y_hat = F.log_softmax(logits, dim=1)
-    func = pl.metrics.Accuracy().to(device)
+    func = torchmetrics.Accuracy().to(device)
     return func(log_y_hat, y)
 
 
